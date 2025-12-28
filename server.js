@@ -6,8 +6,11 @@ const app = express();
 app.get("/", (req, res) => {
   res.json({
     ok: true,
-    message: "Reddit Playwright scraper running",
-    usage: "/reddit-thread?url=<reddit_thread_url>"
+    message: "Scraper running",
+    usage: {
+      reddit: "/reddit-thread?url=<reddit_thread_url>",
+      amazon: "/amazon-reviews?url=<amazon_listing_url>&pages=5"
+    }
   });
 });
 
@@ -15,22 +18,15 @@ app.get("/health", (req, res) => {
   res.json({ status: "ok" });
 });
 
+// -------------------- Reddit --------------------
 function normalizeToJsonUrl(inputUrl) {
   let url = String(inputUrl || "").trim();
 
-  // Remove zero-width chars that can sneak in from copy/paste
   url = url.replace(/[\u200B-\u200D\uFEFF]/g, "");
-
-  // Strip query + fragment
   url = url.replace(/[?#].*$/, "");
-
-  // Remove trailing slash
   url = url.replace(/\/$/, "");
 
-  // If already ends with .json keep it
   if (url.endsWith(".json")) return url;
-
-  // Reddit expects ...something.json (NO extra slash)
   return url + ".json";
 }
 
@@ -46,7 +42,6 @@ app.get("/reddit-thread", async (req, res) => {
 
   let browser;
   try {
-    // Launch hardened for container environments
     browser = await chromium.launch({
       headless: true,
       args: [
@@ -65,13 +60,11 @@ app.get("/reddit-thread", async (req, res) => {
 
     const page = await context.newPage();
 
-    // Since this is JSON, do NOT wait for networkidle
     const response = await page.goto(jsonUrl, {
       waitUntil: "domcontentloaded",
       timeout: 60000
     });
 
-    // If reddit responds with 403/429, capture it clearly
     const status = response ? response.status() : null;
     if (status && status >= 400) {
       const bodyText = await page.content().catch(() => "");
@@ -82,7 +75,6 @@ app.get("/reddit-thread", async (req, res) => {
       });
     }
 
-    // The JSON is usually in the raw body
     const jsonText = await page.evaluate(() => document.body.innerText || "");
 
     if (!jsonText.trim()) {
@@ -113,18 +105,13 @@ app.get("/reddit-thread", async (req, res) => {
       jsonUrl
     });
   } finally {
-    if (browser) {
-      await browser.close().catch(() => {});
-    }
+    if (browser) await browser.close().catch(() => {});
   }
 });
 
-
-
-// --- Amazon helpers ---
+// -------------------- Amazon --------------------
 function extractAsinFromAmazonUrl(inputUrl) {
   const url = String(inputUrl || "").trim().replace(/[\u200B-\u200D\uFEFF]/g, "");
-  // common patterns: /dp/ASIN, /gp/product/ASIN, sometimes ?asin=...
   const m =
     url.match(/\/dp\/([A-Z0-9]{10})/i) ||
     url.match(/\/gp\/product\/([A-Z0-9]{10})/i) ||
@@ -144,10 +131,9 @@ async function detectAmazonBlock(page) {
   return hasCaptcha;
 }
 
-// --- Amazon endpoint ---
 app.get("/amazon-reviews", async (req, res) => {
   const inputUrl = req.query.url;
-  const pages = Math.max(1, Math.min(Number(req.query.pages || 3), 20)); // default 3, cap 20
+  const pages = Math.max(1, Math.min(Number(req.query.pages || 3), 20));
 
   if (!inputUrl) {
     return res.status(400).json({ error: "Missing query param: ?url=<amazon_listing_url>" });
@@ -182,7 +168,7 @@ app.get("/amazon-reviews", async (req, res) => {
 
     const page = await context.newPage();
 
-    // 1) Get product title from listing page
+    // Title
     const productUrl = `https://www.amazon.com/dp/${asin}`;
     await page.goto(productUrl, { waitUntil: "domcontentloaded", timeout: 60000 });
     await page.wait_for_timeout(1200);
@@ -201,9 +187,8 @@ app.get("/amazon-reviews", async (req, res) => {
       }
     }
 
-    // 2) Scrape reviews from /product-reviews pages
+    // Reviews
     const reviews = [];
-
     for (let pageNum = 1; pageNum <= pages; pageNum++) {
       const url = reviewPageUrlForAsin(asin, pageNum);
       await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 });
@@ -213,10 +198,8 @@ app.get("/amazon-reviews", async (req, res) => {
         return res.status(502).json({ error: "Amazon blocked (captcha/robot check) on reviews page", asin, pageNum });
       }
 
-      // Primary selector for review cards
       const cards = page.locator("div[data-hook='review']");
       const count = await cards.count();
-
       if (count === 0) break;
 
       for (let i = 0; i < count; i++) {
@@ -256,9 +239,7 @@ app.get("/amazon-reviews", async (req, res) => {
   }
 });
 
-
-
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log("Playwright scraper listening on port", PORT);
+  console.log("Scraper listening on port", PORT);
 });

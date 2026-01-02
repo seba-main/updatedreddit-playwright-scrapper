@@ -7,7 +7,7 @@ const app = express();
 
 // Your Residential Proxy (Added automatically)
 const PROXIES = [
-  "http://260102Tf4fe-resi-US:rC5a0zqL5dYMNtE@ca.proxy-jet.io:1010"
+ // "http://260102Tf4fe-resi-US:rC5a0zqL5dYMNtE@ca.proxy-jet.io:1010"
 ];
 
 const FORCE_OLD_REDDIT = true;

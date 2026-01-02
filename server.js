@@ -3,6 +3,20 @@ const { chromium } = require("playwright");
 
 const app = express();
 
+// --- CONFIGURATION ---
+
+// 1. ADD YOUR PROXIES HERE
+// We added 'http://' which is required for Playwright.
+// Since this is a rotating gateway, one entry is sufficient.
+const PROXIES = [
+  "http://260102Tf4fe-resi-US:rC5a0zqL5dYMNtE@ca.proxy-jet.io:1010"
+];
+
+// 2. FORCE OLD REDDIT (Often helps with parsing/blocking)
+const FORCE_OLD_REDDIT = true;
+
+// ---------------------
+
 app.get("/", (req, res) => {
   res.json({
     ok: true,
@@ -16,22 +30,41 @@ app.get("/health", (req, res) => {
 });
 
 function normalizeToJsonUrl(inputUrl) {
-  let url = String(inputUrl || "").trim();
+  let urlStr = String(inputUrl || "").trim();
 
-  // Remove zero-width chars that can sneak in from copy/paste
-  url = url.replace(/[\u200B-\u200D\uFEFF]/g, "");
+  // Remove zero-width chars
+  urlStr = urlStr.replace(/[\u200B-\u200D\uFEFF]/g, "");
+  
+  // Basic validity check
+  if (!urlStr.startsWith("http")) {
+    urlStr = "https://" + urlStr;
+  }
 
-  // Strip query + fragment
-  url = url.replace(/[?#].*$/, "");
+  try {
+    const u = new URL(urlStr);
+    
+    // Force old.reddit.com if configured
+    if (FORCE_OLD_REDDIT) {
+      u.hostname = "old.reddit.com";
+    }
 
-  // Remove trailing slash
-  url = url.replace(/\/$/, "");
+    // Ensure it ends in .json
+    if (!u.pathname.endsWith(".json")) {
+      // Remove trailing slash if present before appending
+      if (u.pathname.endsWith("/")) {
+        u.pathname = u.pathname.slice(0, -1); 
+      }
+      u.pathname += ".json";
+    }
 
-  // If already ends with .json keep it
-  if (url.endsWith(".json")) return url;
-
-  // Reddit expects ...something.json (NO extra slash)
-  return url + ".json";
+    // Clear query params to keep it clean
+    u.search = "";
+    
+    return u.toString();
+  } catch (e) {
+    // Fallback if URL parsing fails
+    return inputUrl + ".json";
+  }
 }
 
 app.get("/reddit-thread", async (req, res) => {
@@ -43,55 +76,70 @@ app.get("/reddit-thread", async (req, res) => {
   }
 
   const jsonUrl = normalizeToJsonUrl(inputUrl);
+  
+  // Pick a random proxy
+  const proxyUrl = PROXIES.length > 0 
+    ? PROXIES[Math.floor(Math.random() * PROXIES.length)] 
+    : null;
+
+  console.log(`Scraping: ${jsonUrl} | Proxy: ${proxyUrl ? "Yes" : "No"}`);
 
   let browser;
   try {
-    // Launch hardened for container environments
-    browser = await chromium.launch({
+    // Launch Options
+    const launchOptions = {
       headless: true,
       args: [
         "--no-sandbox",
         "--disable-setuid-sandbox",
         "--disable-dev-shm-usage",
+        "--disable-blink-features=AutomationControlled", // Hides navigator.webdriver
         "--disable-gpu"
       ]
-    });
+    };
+
+    // Inject Proxy if available
+    if (proxyUrl) {
+      launchOptions.proxy = {
+        server: proxyUrl
+      };
+    }
+
+    browser = await chromium.launch(launchOptions);
 
     const context = await browser.newContext({
-      userAgent:
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
-        "(KHTML, like Gecko) Chrome/123 Safari/537.36"
+      userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+      locale: 'en-US',
+      timezoneId: 'America/New_York'
     });
 
     const page = await context.newPage();
 
-    // Since this is JSON, do NOT wait for networkidle
+    // Navigate
     const response = await page.goto(jsonUrl, {
       waitUntil: "domcontentloaded",
       timeout: 60000
     });
 
-    // If reddit responds with 403/429, capture it clearly
     const status = response ? response.status() : null;
+
+    // Handle Blocks (403/429/500)
     if (status && status >= 400) {
       const bodyText = await page.content().catch(() => "");
+      console.error(`Blocked or Error ${status} on ${jsonUrl}`);
+      
       return res.status(502).json({
         error: `Reddit returned HTTP ${status}`,
         jsonUrl,
-        bodyPreview: bodyText.slice(0, 1000)
+        proxyUsed: !!proxyUrl,
+        bodyPreview: bodyText.slice(0, 500) // First 500 chars usually contain the block msg
       });
     }
 
-    // The JSON is usually in the raw body
+    // Extract Text
     const jsonText = await page.evaluate(() => document.body.innerText || "");
 
-    if (!jsonText.trim()) {
-      return res.status(500).json({
-        error: "Reddit returned an empty response",
-        jsonUrl
-      });
-    }
-
+    // Parse JSON
     let data;
     try {
       data = JSON.parse(jsonText);
@@ -105,11 +153,11 @@ app.get("/reddit-thread", async (req, res) => {
     }
 
     return res.json({ jsonUrl, data });
+
   } catch (err) {
     console.error("Scrape error:", err);
     return res.status(500).json({
       error: String(err?.message || err),
-      stack: err?.stack,
       jsonUrl
     });
   } finally {
